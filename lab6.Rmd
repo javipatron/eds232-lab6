@@ -1,6 +1,6 @@
 ---
 title: "Lab6"
-author: {Student Name}
+author: "Javier Patron"
 date: "`r Sys.Date()`"
 output: html_document
 ---
@@ -21,24 +21,22 @@ library(xgboost)
 ```
 
 
-
 ## Data
 Grab the model training data set from the class Git:
 data/eel.model.data.csv
 
 ```{r}
 eel_data <- read_csv(here::here("eel.model.data.csv")) |> 
-  clean_names()
+  clean_names() |> 
+  mutate(angaus = as.factor(angaus))
+
 ```
 
 
 ### Split and Resample
-
 Split the joined data from above into a training and test set, stratified by outcome score. Use 10-fold CV to resample the training set, stratified by Angaus
 
-
 ```{r}
-
 #Split the data
 eel_split <- initial_split(eel_data, strata = "angaus")
 
@@ -64,23 +62,54 @@ eel_recipe <- recipe(angaus ~ .,
   prep() |> 
   bake(new_data = eel_train)
 
-
 ```
-
 
 ## Tuning XGBoost
 
 ```{r}
-
-X <- as.matrix(eel_recipe[setdiff(names(eel_recipe), "Angaus")])
-Y <- eel_recipe$angaus
+xgmodel <-parsnip::boost_tree(
+  mode = "classification",
+  trees = 1000, #nrounds
+  learn_rate = tune(), #eta
+  sample_size = tune(), #subsample
+  mtry = tune(), #colsample_bytree
+  min_n = tune(), #min_child_weight
+  tree_depth = tune() #max_depth
+) %>%
+  set_engine("xgboost", 
+             objective = "multi:softprob",
+             lambda=0, 
+             alpha=1, 
+             num_class=3,
+             verbose=1)
 
 ```
 
+Set up the parameters
+```{r}
+xgboostParams <- dials::parameters(
+  min_n(),
+  tree_depth(),
+  learn_rate(),
+  finalize(mtry(),select(eel_recipe,- angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
+  sample_size = sample_prop(c(0.4, 0.9))
+)
+```
+
+Create a workflow 
+```{r}
+xgWorkflow <- 
+  workflows::workflow() %>%
+  add_model(xgmodel) %>% 
+  add_formula(angaus ~ .)
+```
 
 XGBoost we will tune 3 times. We are creating this tine in three different phases
-1) just a tune for the learning rate
+1) Just a tune for the learning rate
+
 2) Tune each one of the tree parameters
+
+
 3) Tune with the stochastic sampling (for the rows)
 
 
@@ -121,11 +150,41 @@ best_params <- xgb_cv$best_param
 
 -   Only specify one parameter to tune()
 
+
+
 2.  Set up a grid to tune your model by using a range of learning rate parameter values: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+
+Create the grid_max_entropy with the parameters just created
+```{r}
+set.seed(123)
+xgGrid <- dials::grid_max_entropy(xgboostParams, size = 100)
+
+expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+
+```
+
 
 -   Use appropriate metrics argument(s) - Computational efficiency becomes a factor as models get more complex and data get larger. Record the time it takes to run. Do this for each tuning phase you run.You could use {tictoc} or Sys.time().
 
+```{r}
+xgTuned <- tune_grid(
+  object = xgWorkflow,
+  resamples = eel_cv,
+  grid      = xgGrid,
+  metrics   = metric_set(mn_log_loss),
+  control   = control_grid(verbose = TRUE))
+
+```
+
 3.  Show the performance of the best models and the estimates for the learning rate parameter values associated with each.
+
+
+```{r}
+xgTuned %>% tune::show_best(metric = "mn_log_loss") %>% kableExtra::kable()
+```
+
+
+
 
 ### Tune Tree Parameters
 
