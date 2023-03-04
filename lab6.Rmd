@@ -7,7 +7,6 @@ output: html_document
 
 
 ## Case Study Eel Species Distribution Modeling
-
 This week's lab follows a modeling project described by Elith et al. (2008) (Supplementary Reading)
 
 ```{r}
@@ -50,7 +49,6 @@ eel_cv = eel_train |> vfold_cv(v = 10)
 
 ```
 
-
 ### Preprocess
 
 Create a recipe to prepare your data for the XGBoost model.  We are interested in predicting the binary outcome variable Angaus which indicates presence or absence of the eel species Anguilla australis
@@ -64,25 +62,99 @@ eel_recipe <- recipe(angaus ~ .,
 
 ```
 
-## Tuning XGBoost
+
+### Tune Learning Rate
+
+Following the XGBoost tuning strategy outlined on Monday, first we conduct tuning on just the `learn_rate` parameter:
+
+1.  Create a model specification using {xgboost} for the estimation
+
+-   Only specify one parameter to tune()
+```{r}
+xg_model_learn <-parsnip::boost_tree(
+  mode = "classification",
+  trees = 20, # Recommended 3,000
+  learn_rate = tune(), #eta
+) 
+  # set_engine("xgboost", 
+  #            objective = "multi:softprob",
+  #            lambda=0, 
+  #            alpha=1, 
+  #            num_class=3,
+  #            verbose=1)
+
+```
+
+Set up the parameters
+```{r}
+xgboostParams_learn <- dials::parameters(
+  learn_rate(),
+  finalize(mtry(),select(eel_recipe,- angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
+  sample_size = sample_prop(c(0.4, 0.9))
+)
+```
+
+
+2.  Set up a grid to tune your model by using a range of learning rate parameter values: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+```{r}
+set.seed(123)
+xg_grid_learn <- expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+
+```
+
+
+-   Use appropriate metrics argument(s) - Computational efficiency becomes a factor as models get more complex and data get larger. Record the time it takes to run. Do this for each tuning phase you run.You could use {tictoc} or Sys.time().
+
+Create a workflow 
+```{r}
+xgWorkflow_learn <- 
+  workflows::workflow() %>%
+  add_model(xg_model_learn) %>% 
+  add_formula(angaus ~ .)
+
+```
+
+Tune your grid with tune_grid. (tune_grid() runs a set of performance metrics (e.g. accuracy or RMSE) for a pre-defined set of tuning parameters that correspond to a model or recipe across one or more resamples of the data.
 
 ```{r}
-xgmodel <-parsnip::boost_tree(
+xg_learn_tuned <- tune_grid(
+  object = xgWorkflow_learn,
+  resamples = eel_cv,
+  grid      = xg_grid_learn,
+  metrics   = metric_set(mn_log_loss),
+  control   = control_grid(verbose = TRUE))
+
+```
+
+3.  Show the performance of the best models and the estimates for the learning rate parameter values associated with each.
+
+```{r}
+best_learn <- xg_learn_tuned %>% tune::show_best(metric = "mn_log_loss")
+
+best_learn
+
+```
+
+
+### Tune Tree Parameters
+
+1.  Create a new specification where you set the learning rate (which you already optimized) and tune the tree parameters.
+
+```{r}
+xgmodel_three <-parsnip::boost_tree(
   mode = "classification",
-  trees = 1000, #nrounds
-  learn_rate = tune(), #eta
-  sample_size = tune(), #subsample
+  trees = 30, # Recommended 3,000
+  learn_rate = xg_learn_tuned, #eta
   mtry = tune(), #colsample_bytree
   min_n = tune(), #min_child_weight
   tree_depth = tune() #max_depth
-) %>%
-  set_engine("xgboost", 
-             objective = "multi:softprob",
-             lambda=0, 
-             alpha=1, 
-             num_class=3,
-             verbose=1)
-
+) 
+  # set_engine("xgboost", 
+  #            objective = "multi:softprob",
+  #            lambda=0, 
+  #            alpha=1, 
+  #            num_class=3,
+  #            verbose=1)
 ```
 
 Set up the parameters
@@ -96,115 +168,95 @@ xgboostParams <- dials::parameters(
 )
 ```
 
+
 Create a workflow 
 ```{r}
-xgWorkflow <- 
+xg_workflow_three <- 
   workflows::workflow() %>%
-  add_model(xgmodel) %>% 
+  add_model(xgmodel_three) %>% 
   add_formula(angaus ~ .)
-```
-
-XGBoost we will tune 3 times. We are creating this tine in three different phases
-1) Just a tune for the learning rate
-
-2) Tune each one of the tree parameters
-
-
-3) Tune with the stochastic sampling (for the rows)
-
-
-### Tune Learning Rate
-
-Following the XGBoost tuning strategy outlined on Monday, first we conduct tuning on just the learn_rate parameter:
-
-1.  Create a model specification using {xgboost} for the estimation
-
-```{r}
-# Define the parameter grid
-param_grid <- list(
-  booster = "gbtree",
-  eta = c(0.01, 0.1, 0.5),
-  max_depth = c(3, 6, 9),
-  subsample = c(0.5, 0.8, 1),
-  lambda = c(0, 1, 10),
-  alpha = c(0, 1, 10)
-)
-
-# Train and cross-validate the model
-xgb_cv <- xgb.cv(
-  data = X,
-  label = Y,
-  nrounds = 1000,
-  nfold = 10,
-  params = param_grid,
-  early_stopping_rounds = 10,
-  metrics = "error",
-  seed = 123
-)
-
-# Select the best hyperparameters
-best_params <- xgb_cv$best_param
 
 ```
 
 
--   Only specify one parameter to tune()
+2.  Set up a tuning grid. This time use grid_max_entropy() to get a representative sampling of the parameter space
 
-
-
-2.  Set up a grid to tune your model by using a range of learning rate parameter values: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
-
-Create the grid_max_entropy with the parameters just created
 ```{r}
-set.seed(123)
-xgGrid <- dials::grid_max_entropy(xgboostParams, size = 100)
 
-expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+xg_grid_maxent <- dials::grid_max_entropy(xgboostParams, size = 100) #GRID specs from the book
 
 ```
 
 
--   Use appropriate metrics argument(s) - Computational efficiency becomes a factor as models get more complex and data get larger. Record the time it takes to run. Do this for each tuning phase you run.You could use {tictoc} or Sys.time().
-
 ```{r}
-xgTuned <- tune_grid(
-  object = xgWorkflow,
+
+xg_three_tuned <- tune_grid(
+  object = xg_workflow_three,
   resamples = eel_cv,
-  grid      = xgGrid,
+  grid      = xg_grid_maxent ,
   metrics   = metric_set(mn_log_loss),
   control   = control_grid(verbose = TRUE))
 
 ```
 
-3.  Show the performance of the best models and the estimates for the learning rate parameter values associated with each.
-
+3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
 
 ```{r}
-xgTuned %>% tune::show_best(metric = "mn_log_loss") %>% kableExtra::kable()
+xgTuned %>% tune::show_best(metric = "mn_log_loss")
 ```
 
 
-
-
-### Tune Tree Parameters
-
-1.  Create a new specification where you set the learning rate (which you already optimized) and tune the tree parameters.
-
-2.  Set up a tuning grid. This time use grid_max_entropy() to get a representative sampling of the parameter space
-
-3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
 
 ### Tune Stochastic Parameters
 
 1.  Create a new specification where you set the learning rate and tree parameters (which you already optimized) and tune the stochastic parameters.
 
+
+```{r}
+xgmodel_stochastic <-parsnip::boost_tree(
+  mode = "classification",
+  trees = 100, # Recommended 3,000
+  learn_rate = xg_learn_tuned, #eta
+  sample_size = tune(), #stochatic
+  mtry = txg_three_tuned, #colsample_bytree
+  min_n = xg_three_tuned, #min_child_weight
+  tree_depth = xg_three_tuned #max_depth
+) 
+  # set_engine("xgboost", 
+  #            objective = "multi:softprob",
+  #            lambda=0, 
+  #            alpha=1, 
+  #            num_class=3,
+  #            verbose=1)
+```
+
+
+
 2.  Set up a tuning grid. Use grid_max_entropy() again.
 
 3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
 
+
+
+
+
 ## Finalize workflow and make final prediction
 
 1.  Assemble your final workflow will all of your optimized parameters and do a final fit.
+
+```{r}
+xgmodel_stochastic %>% collect_metrics() %>% 
+  select(mean, mtry:sample_size) %>% 
+  data.table %>% 
+  melt(id="mean") %>% 
+  ggplot(aes(y=mean,x=value,colour=variable)) + 
+  geom_point(show.legend = FALSE) + 
+  facet_wrap(variable~. , scales="free") + theme_bw() +
+  labs(y="Mean log-loss", x = "Parameter")
+```
+
+
+
 
 2. How well did your model perform? What types of errors did it make?
 
