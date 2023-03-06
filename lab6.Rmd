@@ -93,9 +93,9 @@ xgboostParams_learn <- dials::parameters(
   sample_size = sample_prop(c(0.4, 0.9))
 )
 ```
+INCOMPLETE: NOT SURE WHEN THEY ARE USED!!
 
-
-2.  Set up a grid to tune your model by using a range of learning rate parameter values: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+2.  Set up a grid to tune your model by using a range of learning rate parameter values: recommended: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
 ```{r}
 set.seed(123)
 xg_grid_learn <- expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
@@ -103,10 +103,11 @@ xg_grid_learn <- expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
 ```
 
 
--   Use appropriate metrics argument(s) - Computational efficiency becomes a factor as models get more complex and data get larger. Record the time it takes to run. Do this for each tuning phase you run.You could use {tictoc} or Sys.time().
+-   Use appropriate metrics argument(s) - Computational efficiency becomes a factor as models get more complex and data get larger. Record the time it takes to run. Do this for each tuning phase you run. You could use {tictoc} or Sys.time().
 
 Create a workflow 
 ```{r}
+
 xgWorkflow_learn <- 
   workflows::workflow() %>%
   add_model(xg_model_learn) %>% 
@@ -129,9 +130,9 @@ xg_learn_tuned <- tune_grid(
 3.  Show the performance of the best models and the estimates for the learning rate parameter values associated with each.
 
 ```{r}
-best_learn <- xg_learn_tuned %>% tune::show_best(metric = "mn_log_loss")
 
-best_learn
+xg_learn_tuned %>% tune::show_best(metric = "mn_log_loss")
+best_learn <- xg_learn_tuned %>% tune::select_best(metric = "mn_log_loss")
 
 ```
 
@@ -144,11 +145,13 @@ best_learn
 xgmodel_three <-parsnip::boost_tree(
   mode = "classification",
   trees = 30, # Recommended 3,000
-  learn_rate = xg_learn_tuned, #eta
+  learn_rate = best_learn, #eta
   mtry = tune(), #colsample_bytree
   min_n = tune(), #min_child_weight
-  tree_depth = tune() #max_depth
-) 
+  tree_depth = tune(), #max_depth
+  sample_size = tune()
+  
+) #DO WE NEED TO SET SOME SET_ENGINE PARAMS ??
   # set_engine("xgboost", 
   #            objective = "multi:softprob",
   #            lambda=0, 
@@ -162,12 +165,10 @@ Set up the parameters
 xgboostParams <- dials::parameters(
   min_n(),
   tree_depth(),
-  learn_rate(),
-  finalize(mtry(),select(eel_recipe,- angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
+  finalize(mtry(), select(eel_recipe, - angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
   sample_size = sample_prop(c(0.4, 0.9))
 )
 ```
-
 
 Create a workflow 
 ```{r}
@@ -182,14 +183,11 @@ xg_workflow_three <-
 2.  Set up a tuning grid. This time use grid_max_entropy() to get a representative sampling of the parameter space
 
 ```{r}
-
-xg_grid_maxent <- dials::grid_max_entropy(xgboostParams, size = 100) #GRID specs from the book
-
+xg_grid_maxent <- dials::grid_max_entropy(xgboostParams, size = 20) #GRID specs from the book
 ```
 
-
+Use the tune_grid to feed all alternatives
 ```{r}
-
 xg_three_tuned <- tune_grid(
   object = xg_workflow_three,
   resamples = eel_cv,
@@ -202,25 +200,25 @@ xg_three_tuned <- tune_grid(
 3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
 
 ```{r}
-xgTuned %>% tune::show_best(metric = "mn_log_loss")
+xg_three_tuned %>% tune::show_best(metric = "mn_log_loss")
+
+three_metrics <- xg_three_tuned %>% tune::select_best(metric = "mn_log_loss")
+
 ```
-
-
 
 ### Tune Stochastic Parameters
 
 1.  Create a new specification where you set the learning rate and tree parameters (which you already optimized) and tune the stochastic parameters.
 
-
 ```{r}
-xgmodel_stochastic <-parsnip::boost_tree(
+stochastic_model <-parsnip::boost_tree(
   mode = "classification",
-  trees = 100, # Recommended 3,000
+  trees = 30, # Recommended 3,000
   learn_rate = xg_learn_tuned, #eta
-  sample_size = tune(), #stochatic
-  mtry = txg_three_tuned, #colsample_bytree
-  min_n = xg_three_tuned, #min_child_weight
-  tree_depth = xg_three_tuned #max_depth
+  sample_size = tune(), #stochastic
+  mtry = three_metrics$mtry, #colsample_bytree
+  min_n = three_metrics$min_n, #min_child_weight
+  tree_depth = three_metrics$tree_depth #max_depth
 ) 
   # set_engine("xgboost", 
   #            objective = "multi:softprob",
@@ -230,15 +228,51 @@ xgmodel_stochastic <-parsnip::boost_tree(
   #            verbose=1)
 ```
 
+Set up the new parameters
+```{r}
+sample_size_Params <- dials::parameters(
+  sample_size(),
+  finalize(mtry(), select(eel_recipe, - angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
+  sample_size = sample_prop(c(0.4, 0.9))
+)
+```
+
+Create a workflow 
+```{r}
+stochastic_workflow <- 
+  workflows::workflow() %>%
+  add_model(stochastic_model) %>% 
+  add_formula(angaus ~ .)
+
+```
 
 
 2.  Set up a tuning grid. Use grid_max_entropy() again.
 
+```{r}
+stochastic_grid <- dials::grid_max_entropy(sample_size_Params, size = 50) #GRID specs from the book
+```
+
+```{r}
+
+stochastic_tuned <- tune_grid(
+  object = stochastic_workflow,
+  resamples = eel_cv,
+  grid      = stochastic_grid ,
+  metrics   = metric_set(mn_log_loss),
+  control   = control_grid(verbose = TRUE))
+
+```
+
+
 3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
 
+```{r}
+stochastic_tuned %>% tune::show_best(metric = "mn_log_loss")
 
+stochastic_metrics <- stochastic_tuned %>% tune::select_best(metric = "mn_log_loss")
 
-
+```
 
 ## Finalize workflow and make final prediction
 
