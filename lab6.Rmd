@@ -16,6 +16,8 @@ library(janitor)
 library(caret)
 library(vip)
 library(xgboost)
+library(reshape2)
+library(tictoc)
 
 ```
 
@@ -75,25 +77,11 @@ xg_model_learn <-parsnip::boost_tree(
   mode = "classification",
   trees = 20, # Recommended 3,000
   learn_rate = tune(), #eta
-) 
-  # set_engine("xgboost", 
-  #            objective = "multi:softprob",
-  #            lambda=0, 
-  #            alpha=1, 
-  #            num_class=3,
-  #            verbose=1)
+) |> 
+  set_engine("xgboost") # Set the model that you want to use.
 
 ```
 
-Set up the parameters
-```{r}
-xgboostParams_learn <- dials::parameters(
-  learn_rate(),
-  finalize(mtry(),select(eel_recipe,- angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
-  sample_size = sample_prop(c(0.4, 0.9))
-)
-```
-INCOMPLETE: NOT SURE WHEN THEY ARE USED!!
 
 2.  Set up a grid to tune your model by using a range of learning rate parameter values: recommended: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
 ```{r}
@@ -118,12 +106,15 @@ xgWorkflow_learn <-
 Tune your grid with tune_grid. (tune_grid() runs a set of performance metrics (e.g. accuracy or RMSE) for a pre-defined set of tuning parameters that correspond to a model or recipe across one or more resamples of the data.
 
 ```{r}
+tic()
 xg_learn_tuned <- tune_grid(
   object = xgWorkflow_learn,
   resamples = eel_cv,
   grid      = xg_grid_learn,
-  metrics   = metric_set(mn_log_loss),
+  metrics   = metric_set(roc_auc),
   control   = control_grid(verbose = TRUE))
+
+toc()
 
 ```
 
@@ -131,33 +122,27 @@ xg_learn_tuned <- tune_grid(
 
 ```{r}
 
-xg_learn_tuned %>% tune::show_best(metric = "mn_log_loss")
-best_learn <- xg_learn_tuned %>% tune::select_best(metric = "mn_log_loss")
+xg_learn_tuned %>% tune::show_best(metric = "roc_auc")
+best_learn <- xg_learn_tuned %>% tune::select_best(metric = "roc_auc")
 
 ```
 
 
 ### Tune Tree Parameters
 
-1.  Create a new specification where you set the learning rate (which you already optimized) and tune the tree parameters.
+1.  Create a new specification where you set the learning rate (which you already optimized) and tune the tree parameters (trees = 3,000. tree_depth, min_n, loss_reduction)
 
 ```{r}
 xgmodel_three <-parsnip::boost_tree(
   mode = "classification",
   trees = 30, # Recommended 3,000
-  learn_rate = best_learn, #eta
-  mtry = tune(), #colsample_bytree
+  learn_rate = best_learn$learn_rate, #eta
   min_n = tune(), #min_child_weight
   tree_depth = tune(), #max_depth
-  sample_size = tune()
-  
-) #DO WE NEED TO SET SOME SET_ENGINE PARAMS ??
-  # set_engine("xgboost", 
-  #            objective = "multi:softprob",
-  #            lambda=0, 
-  #            alpha=1, 
-  #            num_class=3,
-  #            verbose=1)
+  loss_reduction = tune() #loss 
+  ) |> 
+  set_engine("xgboost")
+
 ```
 
 Set up the parameters
@@ -165,9 +150,7 @@ Set up the parameters
 xgboostParams <- dials::parameters(
   min_n(),
   tree_depth(),
-  finalize(mtry(), select(eel_recipe, - angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
-  sample_size = sample_prop(c(0.4, 0.9))
-)
+  loss_reduction())
 ```
 
 Create a workflow 
@@ -188,59 +171,56 @@ xg_grid_maxent <- dials::grid_max_entropy(xgboostParams, size = 20) #GRID specs 
 
 Use the tune_grid to feed all alternatives
 ```{r}
+tic()
+
 xg_three_tuned <- tune_grid(
   object = xg_workflow_three,
   resamples = eel_cv,
   grid      = xg_grid_maxent ,
-  metrics   = metric_set(mn_log_loss),
+  metrics   = metric_set(roc_auc),
   control   = control_grid(verbose = TRUE))
 
+toc()
 ```
 
 3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
 
 ```{r}
-xg_three_tuned %>% tune::show_best(metric = "mn_log_loss")
+xg_three_tuned %>% tune::show_best(metric = "roc_auc")
 
-three_metrics <- xg_three_tuned %>% tune::select_best(metric = "mn_log_loss")
+three_metrics <- xg_three_tuned %>% tune::select_best(metric = "roc_auc")
 
 ```
 
 ### Tune Stochastic Parameters
 
-1.  Create a new specification where you set the learning rate and tree parameters (which you already optimized) and tune the stochastic parameters.
+1.  Create a new specification where you set the learning rate and tree parameters (which you already optimized. lean_rate, min_n, tree_depth, loss_reduction) and tune the stochastic parameters.
 
 ```{r}
 stochastic_model <-parsnip::boost_tree(
   mode = "classification",
   trees = 30, # Recommended 3,000
-  learn_rate = xg_learn_tuned, #eta
-  sample_size = tune(), #stochastic
-  mtry = three_metrics$mtry, #colsample_bytree
+  learn_rate = best_learn$learn_rate,
+  tree_depth = three_metrics$tree_depth, #max_depth
   min_n = three_metrics$min_n, #min_child_weight
-  tree_depth = three_metrics$tree_depth #max_depth
-) 
-  # set_engine("xgboost", 
-  #            objective = "multi:softprob",
-  #            lambda=0, 
-  #            alpha=1, 
-  #            num_class=3,
-  #            verbose=1)
+  loss_reduction = three_metrics$loss_reduction, #loss
+  sample_size = tune(), #stochastic
+  mtry = tune() #colsample_by tree stochastic
+) |> 
+  set_engine("xgboost")
 ```
 
 Set up the new parameters
 ```{r}
-sample_size_Params <- dials::parameters(
-  sample_size(),
-  finalize(mtry(), select(eel_recipe, - angaus)), #mtry() is the number of variables used in the making of each tree we need to bound it by the number of variables available.
-  sample_size = sample_prop(c(0.4, 0.9))
-)
+stochastic_Params <- dials::parameters(
+  sample_size = sample_prop(),
+  finalize(mtry(), eel_train))
+
 ```
 
 Create a workflow 
 ```{r}
-stochastic_workflow <- 
-  workflows::workflow() %>%
+stochastic_workflow <- workflows::workflow() %>%
   add_model(stochastic_model) %>% 
   add_formula(angaus ~ .)
 
@@ -248,9 +228,10 @@ stochastic_workflow <-
 
 
 2.  Set up a tuning grid. Use grid_max_entropy() again.
-
 ```{r}
-stochastic_grid <- dials::grid_max_entropy(sample_size_Params, size = 50) #GRID specs from the book
+
+stochastic_grid <- dials::grid_max_entropy(stochastic_Params, size = 20) #GRID specs from the book
+
 ```
 
 ```{r}
@@ -259,7 +240,7 @@ stochastic_tuned <- tune_grid(
   object = stochastic_workflow,
   resamples = eel_cv,
   grid      = stochastic_grid ,
-  metrics   = metric_set(mn_log_loss),
+  metrics   = metric_set(roc_auc),
   control   = control_grid(verbose = TRUE))
 
 ```
@@ -268,39 +249,111 @@ stochastic_tuned <- tune_grid(
 3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
 
 ```{r}
-stochastic_tuned %>% tune::show_best(metric = "mn_log_loss")
-
-stochastic_metrics <- stochastic_tuned %>% tune::select_best(metric = "mn_log_loss")
+stochastic_tuned %>% tune::show_best(metric = "roc_auc")
+stochastic_metrics <- stochastic_tuned %>% tune::select_best(metric = "roc_auc")
 
 ```
 
 ## Finalize workflow and make final prediction
 
-1.  Assemble your final workflow will all of your optimized parameters and do a final fit.
-
 ```{r}
-xgmodel_stochastic %>% collect_metrics() %>% 
-  select(mean, mtry:sample_size) %>% 
-  data.table %>% 
-  melt(id="mean") %>% 
-  ggplot(aes(y=mean,x=value,colour=variable)) + 
-  geom_point(show.legend = FALSE) + 
-  facet_wrap(variable~. , scales="free") + theme_bw() +
-  labs(y="Mean log-loss", x = "Parameter")
+#try autoplot()
+
+final_model <-parsnip::boost_tree(
+  mode = "classification",
+  trees = tune(), # Recommended 3,000
+  learn_rate = best_learn$learn_rate,
+  tree_depth = three_metrics$tree_depth, #max_depth
+  min_n = three_metrics$min_n, #min_child_weight
+  loss_reduction = three_metrics$loss_reduction, #loss
+  sample_size = stochastic_metrics$sample_size, #stochastic
+  mtry = stochastic_metrics$mtry,
+  stop_iter = tune()
+  #colsample_by tree stochastic
+) |> 
+  set_engine("xgboost")
+
+# Create your workflow
+final_workflow <- workflows::workflow() %>%
+  add_model(final_model) %>% 
+  add_formula(angaus ~ .)
+
+# Create your final parameters
+final_Params <- dials::parameters(stop_iter(),
+                                  trees())
+
+# Create your grid
+final_grid <- dials::grid_max_entropy(final_Params, size = 20) 
+
+# Run your final model
+
+final_tuned <- tune_grid(
+  object = final_workflow,
+  resamples = eel_cv,
+  grid      = final_grid ,
+  metrics   = metric_set(roc_auc),
+  control   = control_grid(verbose = TRUE))
+
+
 ```
 
 
+1.  Assemble your final workflow will all of your optimized parameters and do a final fit.
 
+```{r}
+
+xg_model_learn %>% collect_metrics() %>% 
+  select(mean, mtry:sample_size) %>% 
+  melt(id="mean") %>% 
+  ggplot(aes(y = mean,
+             x = value,
+             colour = variable)) + 
+  geom_point(show.legend = FALSE) + 
+  facet_wrap(variable~. , scales="free") + theme_bw() +
+  labs(y="Mean log-loss", x = "Parameter")
+
+```
 
 2. How well did your model perform? What types of errors did it make?
+
+**Written model: **
 
 ## Fit your model the evaluation data and compare performance
 
 1.  Now fit your final model to the big dataset: data/eval.data.csv
 
+```{r}
+# Finalize the model
+final_boosted <- finalize_model(final_model, 
+                             select_best(final_tuned))
+
+# Fit the model to the testing data!
+final_forest_fit <- last_fit(final_boosted, 
+                           angaus ~ . , 
+                           eel_split) # eel_split or eel_test
+```
+
+
+lab5, just predictions. dont do the full dataset.
+
+collection_metric (accuracy) 
+
 2.  How does your model perform on this data?
 
 3.  How do your results compare to those of Elith et al.?
 
+
 -   Use {vip} to compare variable importance
 -   What do your variable importance results tell you about the distribution of this eel species?
+
+
+```{r}
+orig_var_imp <- final_wf |>
+  fit(data = eel_model_data) |>
+  pull_workflow_fit() |>
+  vip(geom = "col", num_features = 12) + 
+  labs(title = "Original Data")
+```
+
+
+
