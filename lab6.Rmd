@@ -85,7 +85,7 @@ xg_model_learn <-parsnip::boost_tree(
 
 2.  Set up a grid to tune your model by using a range of learning rate parameter values: recommended: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
 ```{r}
-set.seed(123)
+set.seed(333)
 xg_grid_learn <- expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
 
 ```
@@ -256,6 +256,7 @@ stochastic_metrics <- stochastic_tuned %>% tune::select_best(metric = "roc_auc")
 
 ## Finalize workflow and make final prediction
 
+1.  Assemble your final workflow will all of your optimized parameters and do a final fit.
 ```{r}
 #try autoplot()
 
@@ -297,19 +298,24 @@ final_tuned <- tune_grid(
 
 ```
 
+Take a look at the results
+```{r}
+final_tuned %>% tune::show_best(metric = "roc_auc")
+final_metrics <- final_tuned %>% tune::select_best(metric = "roc_auc")
+```
 
-1.  Assemble your final workflow will all of your optimized parameters and do a final fit.
-
+2. How well did your model perform? What types of errors did it make?
 ```{r}
 
-xg_model_learn %>% collect_metrics() %>% 
+final_tuned %>% collect_metrics() %>% 
   select(mean, mtry:sample_size) %>% 
+  data.table |> 
   melt(id="mean") %>% 
   ggplot(aes(y = mean,
              x = value,
              colour = variable)) + 
   geom_point(show.legend = FALSE) + 
-  facet_wrap(variable~. , scales="free") + theme_bw() +
+  facet_wrap(variable ~ . , scales="free") + theme_bw() +
   labs(y="Mean log-loss", x = "Parameter")
 
 ```
@@ -328,24 +334,17 @@ final_boosted <- finalize_model(final_model,
                              select_best(final_tuned))
 
 # Fit the model to the testing data!
-final_forest_fit <- last_fit(final_boosted, 
+final_boosted_fit <- last_fit(final_boosted, 
                            angaus ~ . , 
                            eel_split) # eel_split or eel_test
 ```
 
-
-lab5, just predictions. dont do the full dataset.
-
-collection_metric (accuracy) 
-
 2.  How does your model perform on this data?
+
 
 3.  How do your results compare to those of Elith et al.?
 
-
 -   Use {vip} to compare variable importance
--   What do your variable importance results tell you about the distribution of this eel species?
-
 
 ```{r}
 orig_var_imp <- final_wf |>
@@ -355,5 +354,17 @@ orig_var_imp <- final_wf |>
   labs(title = "Original Data")
 ```
 
+
+```{r}
+final_boosted_fit %>%
+  fit(data = eel_train) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "col", num_features = 12) +
+  lab(title = "Most Important Variables")
+
+```
+
+
+-   What do your variable importance results tell you about the distribution of this eel species?
 
 
